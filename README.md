@@ -1,3 +1,15 @@
+# Fork:
+
+This fork has been rewritten with a restructured codebase and adds support for image encryption in Kaggle environments.
+
+## Dependencies
+
+This fork requires the [Encrypt-image](https://github.com/anxety-solo/sd-encrypt-image) extension for image encryption functionality.
+
+---
+
+# Original README:
+
 # Civitai Extension for Automatic 1111 Stable Diffusion Web UI
 
 Stripped down version of [Civitai Extension for Automatic 1111 Stable Diffusion Web UI](https://github.com/civitai/sd_civitai_extension) remove most things that I don't want.
