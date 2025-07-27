@@ -309,12 +309,12 @@ def download_preview(url: str, dest_path: str, on_progress: callable = None) -> 
         resized_image = _resize_image_bytes(image_data)
 
         if IS_KAGGLE:
-            import sd_encrypt_image     # Import Module for Encrypt Image
+            import sd_image_encryption     # Import Module for Encrypt Image
 
             img = Image.open(resized_image)
             imginfo = img.info or {}
             if not all(key in imginfo for key in ['Encrypt', 'EncryptPwdSha']):
-                sd_encrypt_image.EncryptedImage.from_image(img).save(dest)
+                sd_image_encryption.EncryptedImage.from_image(img).save(dest)
         else:
             dest.write_bytes(resized_image.read())
 
