@@ -42,8 +42,8 @@ def merge_infotext(infotext: str, hashtext: Dict[str, str]) -> str:
 
 def civitai_hashes(infotext: str) -> Dict[str, str]:
     """Extract and match resource hashes from infotext."""
-    additional_network_type_map = {'lora': 'LORA', 'hypernet': 'Hypernetwork'}
-    additional_network_pattern = r'<(lora|hypernet):([a-zA-Z0-9_\.\-\s]+):([0-9.]+)(?:[:].*)?>'
+    additional_network_type_map = {'lora': 'LORA'}
+    additional_network_pattern = r'<(lora):([a-zA-Z0-9_\.\-\s]+):([0-9.]+)(?:[:].*)?>'
     model_hash_pattern = r'Model hash: ([0-9a-fA-F]{10})'
 
     hashify_resources = shared.opts.data.get('civitai_hashify_resources', True)
@@ -80,7 +80,7 @@ def civitai_hashes(infotext: str) -> Dict[str, str]:
         if pattern.search(prompt) or pattern.search(negative_prompt):
             resource_hashes[f"embed:{embedding['name']}"] = embedding['hash'][:10]
 
-    # Add additional network hashes (LoRA, Hypernet)
+    # Add additional network hashes (LoRA)
     for match in re.findall(additional_network_pattern, prompt):
         network_type, network_name, _ = match
         resource_type = additional_network_type_map[network_type]

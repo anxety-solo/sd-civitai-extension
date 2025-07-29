@@ -11,7 +11,7 @@ from civitai.logger import log_message
 
 
 lock = threading.Lock()
-types = ['LORA', 'LoCon', 'Hypernetwork', 'TextualInversion', 'Checkpoint']
+types = ['LORA', 'LoCon', 'TextualInversion', 'Checkpoint']
 VERSION = '2'
 
 def get_verbose() -> bool:
@@ -44,6 +44,7 @@ def load_info() -> None:
     }
 
     updated_count = 0
+    processed_paths = set()
 
     for r in results:
         if r is None:
@@ -53,36 +54,44 @@ def load_info() -> None:
             if 'hashes' not in f or 'SHA256' not in f['hashes']:
                 continue
 
-            sha256 = f['hashes']['SHA256']
-            if sha256.lower() not in hashes:
+            sha256 = f['hashes']['SHA256'].lower()
+            if sha256 not in hashes:
                 continue
 
-            data = {
-                'activation text': ', '.join(r.get('trainedWords', [])),
-                'sd version': next((v for k, v in base_list.items() if k in r.get('baseModel', '')), ''),
-                'modelId': r['modelId'],
-                'modelVersionId': r['id'],
-                'sha256': sha256.upper()
-            }
-
-            matching_resources = [r for r in missing if sha256.lower() == r['hash']]
+            matching_resources = [res for res in missing if sha256 == res['hash']]
             if not matching_resources:
                 continue
 
             for resource in matching_resources:
                 path = Path(resource['path']).with_suffix('.json')
-                path.write_text(json.dumps(data, indent=4), encoding='utf-8')
-                updated_count += 1
-                if verbose:
-                    log_message(f"Updated info for: {resource['name']}", status='success', verbose=verbose)
+                if str(path) in processed_paths:
+                    continue
+                path.write_text(json.dumps({
+                    'activation text': ', '.join(r.get('trainedWords', [])),
+                    'sd version': next((v for k, v in base_list.items() if k in r.get('baseModel', '')), ''),
+                    'modelId': r['modelId'],
+                    'modelVersionId': r['id'],
+                    'sha256': sha256.upper()
+                }, indent=4), encoding='utf-8')
+                # Check that the file is actually created and not empty
+                if path.exists() and path.stat().st_size > 0:
+                    updated_count += 1
+                    processed_paths.add(str(path))
+                    if verbose:
+                        log_message(f"Updated info for: {resource['name']}", status='success', verbose=verbose)
+                else:
+                    if verbose:
+                        log_message(f"Failed to write info for: {resource['name']}", status='error', verbose=verbose)
 
     if updated_count > 0:
         log_message(f"Updated {updated_count} info files", status='info', verbose=True)
 
+
 def load_preview() -> None:
     """Load missing preview images for resources."""
     verbose = get_verbose()
-    hashes = [r['hash'] for r in civitai.load_resource_list() if r['type'] in types and not r['hasPreview']]
+    missing = [r for r in civitai.load_resource_list() if r['type'] in types and not r['hasPreview']]
+    hashes = [r['hash'] for r in missing]
 
     if not hashes:
         return
@@ -94,6 +103,7 @@ def load_preview() -> None:
     log_message('Checking resources for missing preview images...', status='info', verbose=True)
 
     updated_count = 0
+    processed_paths = set()
 
     for r in results:
         if r is None:
@@ -103,8 +113,12 @@ def load_preview() -> None:
             if 'hashes' not in f or 'SHA256' not in f['hashes']:
                 continue
 
-            sha256 = f['hashes']['SHA256']
-            if sha256.lower() not in hashes:
+            sha256 = f['hashes']['SHA256'].lower()
+            if sha256 not in hashes:
+                continue
+
+            matching_resources = [res for res in missing if sha256 == res['hash']]
+            if not matching_resources:
                 continue
 
             images = r.get('images', [])
@@ -115,10 +129,19 @@ def load_preview() -> None:
             if preview is None:
                 continue
 
-            civitai.update_resource_preview(sha256, preview['url'])
-            updated_count += 1
-            if verbose:
-                log_message(f"Updated preview for: {r['name']}", status='success', verbose=verbose)
+            for resource in matching_resources:
+                preview_path = Path(resource['path']).with_suffix('.preview.png')
+                if str(preview_path) in processed_paths:
+                    continue
+                # Only consider successful downloads
+                if civitai.update_resource_preview(sha256, preview['url']):
+                    updated_count += 1
+                    processed_paths.add(str(preview_path))
+                    if verbose:
+                        log_message(f"Updated preview for: {resource['name']}", status='success', verbose=verbose)
+                else:
+                    if verbose:
+                        log_message(f"Failed to update preview for: {resource['name']}", status='error', verbose=verbose)
 
     if updated_count > 0:
         log_message(f"Updated {updated_count} preview images", status='info', verbose=True)
@@ -143,7 +166,7 @@ def run_load_preview():
 
 def app(_: gr.Blocks, app):
     """Initialize extension on app start."""
-    log_message(f"Starting CivitAI extension \033[32mV{VERSION}\033[0m", status='info', verbose=True)
+    log_message(f"Starting CivitAI-Extension \033[32mV{VERSION}\033[0m", status='info', verbose=True)
 
     info_thread = threading.Thread(target=run_load_info)
     preview_thread = threading.Thread(target=run_load_preview)

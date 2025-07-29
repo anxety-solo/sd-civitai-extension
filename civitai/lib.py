@@ -76,8 +76,8 @@ def get_model_dir() -> str:
 
 def get_automatic_type(file_type: str) -> str:
     """Convert file type to automatic type."""
-    if file_type == 'Hypernetwork':
-        return 'hypernet'
+    # if file_type == 'Hypernetwork':
+    #     return 'hypernet'
     return file_type.lower()
 
 def get_automatic_name(file_type: str, filename: str, folder: str) -> str:
@@ -206,14 +206,13 @@ def load_resource_list(types: List[str] = None) -> List[Dict[str, Any]]:
     verbose = get_verbose()
 
     if types is None:
-        types = ['LORA', 'LoCon', 'Hypernetwork', 'TextualInversion', 'Checkpoint', 'VAE', 'Controlnet', 'Upscaler']
+        types = ['LORA', 'LoCon', 'TextualInversion', 'Checkpoint', 'VAE', 'Controlnet', 'Upscaler']
 
     res = [r for r in resources if r['type'] not in types]
 
     folders = {
         'LORA': Path(get_lora_dir()),
         'LoCon': Path(get_locon_dir()),
-        'Hypernetwork': Path(getattr(shared.cmd_opts, 'hypernetwork_dir', '')),
         'TextualInversion': Path(getattr(shared.cmd_opts, 'embeddings_dir', '')),
         'Checkpoint': Path(get_model_dir()),
         'Controlnet': Path(models_path) / 'ControlNet',
@@ -226,7 +225,6 @@ def load_resource_list(types: List[str] = None) -> List[Dict[str, Any]]:
     type_configs = [
         ('LORA', folders['LORA'], ['pt', 'safetensors', 'ckpt']),
         ('LoCon', folders['LoCon'], ['pt', 'safetensors', 'ckpt']) if folders['LORA'] != folders['LoCon'] else None,
-        ('Hypernetwork', folders['Hypernetwork'], ['pt', 'safetensors', 'ckpt']),
         ('TextualInversion', folders['TextualInversion'], ['pt', 'bin', 'safetensors']),
         ('Checkpoint', folders['Checkpoint'], ['safetensors', 'ckpt'], ['vae.safetensors', 'vae.ckpt']),
         ('Controlnet', folders['Controlnet'], ['safetensors', 'ckpt'], ['vae.safetensors', 'vae.ckpt']),
@@ -281,12 +279,12 @@ def _resize_image_bytes(image_bytes, target_size=512):
     output.seek(0)
     return output
 
-def download_preview(url: str, dest_path: str, on_progress: callable = None) -> None:
-    """Download and resize preview image."""
+def download_preview(url: str, dest_path: str, on_progress: callable = None) -> bool:
+    """Download and resize preview image. Returns True if successful, False otherwise."""
     verbose = get_verbose()
     dest = Path(dest_path).expanduser()
     if dest.exists():
-        return
+        return True
 
     if verbose:
         log_message(f"Downloading preview: {url}", status='info', verbose=verbose)
@@ -310,21 +308,26 @@ def download_preview(url: str, dest_path: str, on_progress: callable = None) -> 
 
         if IS_KAGGLE:
             import sd_image_encryption     # Import Module for Encrypt Image
-
             img = Image.open(resized_image)
             imginfo = img.info or {}
             if not all(key in imginfo for key in ['Encrypt', 'EncryptPwdSha']):
                 sd_image_encryption.EncryptedImage.from_image(img).save(dest)
         else:
             dest.write_bytes(resized_image.read())
+        return True
 
     except Exception as e:
         log_message(f"Preview download failed: {dest} : {e}", status='error', verbose=verbose)
         if dest.exists():
             dest.unlink()
+        return False
 
-def update_resource_preview(hash: str, preview_url: str) -> None:
-    """Update preview for resource with given hash."""
+
+def update_resource_preview(hash: str, preview_url: str) -> bool:
+    """Update preview for resource with given hash. Returns True if successful, False otherwise."""
+    success = False
     for res in [r for r in load_resource_list([]) if r['hash'] == hash.lower()]:
         preview_path = Path(res['path']).with_suffix('.preview.png')
-        download_preview(preview_url, str(preview_path))
+        if download_preview(preview_url, str(preview_path)):
+            success = True
+    return success
