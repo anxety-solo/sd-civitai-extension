@@ -1,17 +1,19 @@
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-from pathlib import Path
-from PIL import Image
 import requests
 import json
 import time
 import sys
 import os
 import io
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from pathlib import Path
+from PIL import Image
 
+# === WebUI imports ===
 from modules import shared, sd_models, sd_vae, hashes, ui_extra_networks, cache
 from modules.paths import models_path
 
+# === Extension imports ===
 from .logger import log_message
 
 
@@ -27,6 +29,7 @@ resources = []
 def get_verbose() -> bool:
     """Get verbose logging setting."""
     return getattr(shared.opts, 'civitai_verbose', False)
+
 
 def req(endpoint: str, method: str = 'GET', data: Any = None, params: Dict[str, Any] = None, headers: Dict[str, str] = None) -> Dict[str, Any]:
     """Make HTTP request to Civitai API."""
@@ -286,8 +289,7 @@ def download_preview(url: str, dest_path: str, on_progress: callable = None) -> 
     if dest.exists():
         return True
 
-    if verbose:
-        log_message(f"Downloading preview: {url}", status='info', verbose=verbose)
+    log_message(f"Downloading preview: {url}", status='info', verbose=verbose)
 
     response = requests.get(url, stream=True, headers={'User-Agent': user_agent})
     total = int(response.headers.get('content-length', 0))

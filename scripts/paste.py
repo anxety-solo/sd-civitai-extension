@@ -1,10 +1,12 @@
-from typing import Dict
 import json
 import re
 import os
+from typing import Dict
 
+# === WebUI imports ===
 from modules import sd_vae, shared, processing as P
 
+# === Extension imports ===
 import civitai.lib as civitai
 
 
