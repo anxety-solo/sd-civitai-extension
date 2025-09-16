@@ -15,154 +15,123 @@ from civitai.lib import get_verbose
 
 lock = threading.Lock()
 types = ['LORA', 'LoCon', 'TextualInversion', 'Checkpoint']
-VERSION = '2.1'
+VERSION = '2.2'
 
+
+def _process_resources(process_type: str, missing_condition: callable, process_func: callable) -> None:
+    """Common function to process resources (info or preview)"""
+    verbose = get_verbose()
+    missing = [r for r in civitai.load_resource_list() if r['type'] in types and missing_condition(r)]
+    hashes = [r['hash'] for r in missing]
+
+    if not hashes:
+        return
+
+    results = civitai.get_all_by_hash_with_cache(hashes)
+    if not results:
+        return
+
+    log_message(f'Checking resources for missing {process_type}...', status='info', verbose=True)
+
+    updated_count = 0
+    processed_paths = set()
+
+    for r in results:
+        if r is None:
+            continue
+
+        for f in r['files']:
+            if 'hashes' not in f or 'SHA256' not in f['hashes']:
+                continue
+
+            sha256 = f['hashes']['SHA256'].lower()
+            if sha256 not in hashes:
+                continue
+
+            matching_resources = [res for res in missing if sha256 == res['hash']]
+            if not matching_resources:
+                continue
+
+            for resource in matching_resources:
+                if process_func(r, resource, processed_paths, verbose):
+                    updated_count += 1
+
+    if updated_count > 0:
+        log_message(f"Updated {updated_count} {process_type} files", status='info', verbose=True)
+
+def _process_info_file(r: dict, resource: dict, processed_paths: set, verbose: bool) -> bool:
+    """Process info file for a resource."""
+    path = Path(resource['path']).with_suffix('.json')
+    if str(path) in processed_paths:
+        return False
+
+    base_list = {
+        'SD 1': 'SD1', 'SD 1.5': 'SD1', 'SD 2': 'SD2', 'SD 3': 'SD3',
+        'SDXL': 'SDXL', 'Pony': 'SDXL', 'Illustrious': 'SDXL'
+    }
+
+    path.write_text(json.dumps({
+        'activation text': ', '.join(r.get('trainedWords', [])),
+        'sd version': next((v for k, v in base_list.items() if k in r.get('baseModel', '')), ''),
+        'modelId': r['modelId'],
+        'modelVersionId': r['id'],
+        'sha256': r['files'][0]['hashes']['SHA256'].upper()
+    }, indent=4), encoding='utf-8')
+
+    if path.exists() and path.stat().st_size > 0:
+        processed_paths.add(str(path))
+        log_message(f"Updated info for: {resource['name']}", status='success', verbose=verbose)
+        return True
+    else:
+        log_message(f"Failed to write info for: {resource['name']}", status='error', verbose=verbose)
+        return False
 
 def load_info() -> None:
     """Load missing info files for resources."""
-    verbose = get_verbose()
-    missing = [r for r in civitai.load_resource_list() if r['type'] in types and not r['hasInfo']]
-    hashes = [r['hash'] for r in missing]
+    _process_resources('info', lambda r: not r['hasInfo'], _process_info_file)
 
-    if not hashes:
-        return
+def _process_preview_file(r: dict, resource: dict, processed_paths: set, verbose: bool) -> bool:
+    """Process preview file for a resource."""
+    images = r.get('images', [])
+    if not images:
+        return False
 
-    results = civitai.get_all_by_hash_with_cache(hashes)
-    if not results:
-        return
+    preview = next((p for p in images if not p['url'].lower().endswith(('.mp4', '.gif'))), None)
+    if preview is None:
+        return False
 
-    log_message('Checking resources for missing info files...', status='info', verbose=True)
+    preview_path = Path(resource['path']).with_suffix('.preview.png')
+    if str(preview_path) in processed_paths:
+        return False
 
-    base_list = {
-        'SD 1': 'SD1',
-        'SD 1.5': 'SD1',
-        'SD 2': 'SD2',
-        'SD 3': 'SD3',
-        'SDXL': 'SDXL',
-        'Pony': 'SDXL',
-        'Illustrious': 'SDXL',
-        'Flux': 'FLUX',
-        'Flux 1.0': 'FLUX',
-        'Flux 1.1': 'FLUX'
-    }
-
-    updated_count = 0
-    processed_paths = set()
-
-    for r in results:
-        if r is None:
-            continue
-
-        for f in r['files']:
-            if 'hashes' not in f or 'SHA256' not in f['hashes']:
-                continue
-
-            sha256 = f['hashes']['SHA256'].lower()
-            if sha256 not in hashes:
-                continue
-
-            matching_resources = [res for res in missing if sha256 == res['hash']]
-            if not matching_resources:
-                continue
-
-            for resource in matching_resources:
-                path = Path(resource['path']).with_suffix('.json')
-                if str(path) in processed_paths:
-                    continue
-
-                path.write_text(json.dumps({
-                    'activation text': ', '.join(r.get('trainedWords', [])),
-                    'sd version': next((v for k, v in base_list.items() if k in r.get('baseModel', '')), ''),
-                    'modelId': r['modelId'],
-                    'modelVersionId': r['id'],
-                    'sha256': sha256.upper()
-                }, indent=4), encoding='utf-8')
-
-                # Check that the file is actually created and not empty
-                if path.exists() and path.stat().st_size > 0:
-                    updated_count += 1
-                    processed_paths.add(str(path))
-                    log_message(f"Updated info for: {resource['name']}", status='success', verbose=verbose)
-                else:
-                    log_message(f"Failed to write info for: {resource['name']}", status='error', verbose=verbose)
-
-    if updated_count > 0:
-        log_message(f"Updated {updated_count} info files", status='info', verbose=True)
+    if civitai.update_resource_preview(resource['hash'], preview['url']):
+        processed_paths.add(str(preview_path))
+        log_message(f"Updated preview for: {resource['name']}", status='success', verbose=verbose)
+        return True
+    else:
+        log_message(f"Failed to update preview for: {resource['name']}", status='error', verbose=verbose)
+        return False
 
 def load_preview() -> None:
     """Load missing preview images for resources."""
+    _process_resources('preview', lambda r: not r['hasPreview'], _process_preview_file)
+
+def _run_with_lock(func: callable, error_msg: str) -> None:
+    """Run function in thread-safe manner."""
     verbose = get_verbose()
-    missing = [r for r in civitai.load_resource_list() if r['type'] in types and not r['hasPreview']]
-    hashes = [r['hash'] for r in missing]
-
-    if not hashes:
-        return
-
-    results = civitai.get_all_by_hash_with_cache(hashes)
-    if not results:
-        return
-
-    log_message('Checking resources for missing preview images...', status='info', verbose=True)
-
-    updated_count = 0
-    processed_paths = set()
-
-    for r in results:
-        if r is None:
-            continue
-
-        for f in r['files']:
-            if 'hashes' not in f or 'SHA256' not in f['hashes']:
-                continue
-
-            sha256 = f['hashes']['SHA256'].lower()
-            if sha256 not in hashes:
-                continue
-
-            matching_resources = [res for res in missing if sha256 == res['hash']]
-            if not matching_resources:
-                continue
-
-            images = r.get('images', [])
-            if not images:
-                continue
-
-            preview = next((p for p in images if not p['url'].lower().endswith(('.mp4', '.gif'))), None)
-            if preview is None:
-                continue
-
-            for resource in matching_resources:
-                preview_path = Path(resource['path']).with_suffix('.preview.png')
-                if str(preview_path) in processed_paths:
-                    continue
-                # Only consider successful downloads
-                if civitai.update_resource_preview(sha256, preview['url']):
-                    updated_count += 1
-                    processed_paths.add(str(preview_path))
-                    log_message(f"Updated preview for: {resource['name']}", status='success', verbose=verbose)
-                else:
-                    log_message(f"Failed to update preview for: {resource['name']}", status='error', verbose=verbose)
-
-    if updated_count > 0:
-        log_message(f"Updated {updated_count} preview images", status='info', verbose=True)
+    with lock:
+        try:
+            func()
+        except Exception as e:
+            log_message(f"{error_msg}: {e}", status='error', verbose=verbose)
 
 def run_load_info():
     """Run info loading in thread-safe manner."""
-    verbose = get_verbose()
-    with lock:
-        try:
-            load_info()
-        except Exception as e:
-            log_message(f"Error loading info: {e}", status='error', verbose=verbose)
+    _run_with_lock(load_info, "Error loading info")
 
 def run_load_preview():
     """Run preview loading in thread-safe manner."""
-    verbose = get_verbose()
-    with lock:
-        try:
-            load_preview()
-        except Exception as e:
-            log_message(f"Error loading previews: {e}", status='error', verbose=verbose)
+    _run_with_lock(load_preview, "Error loading previews")
 
 
 def app(_: gr.Blocks, app):

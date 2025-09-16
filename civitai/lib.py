@@ -79,8 +79,6 @@ def get_model_dir() -> str:
 
 def get_automatic_type(file_type: str) -> str:
     """Convert file type to automatic type."""
-    # if file_type == 'Hypernetwork':
-    #     return 'hypernet'
     return file_type.lower()
 
 def get_automatic_name(file_type: str, filename: str, folder: str) -> str:
@@ -137,7 +135,7 @@ def get_resources_in_folder(file_type: str, folder: str, exts: List[str] = None,
     candidates = [f for ext in exts for f in folder.rglob(f"*.{ext}")
                  if not any(str(f).endswith(e) for e in exts_exclude)]
 
-    _resources = []
+    resources = []
     cmd_opts_no_hashing = shared.cmd_opts.no_hashing
     shared.cmd_opts.no_hashing = False
 
@@ -146,13 +144,12 @@ def get_resources_in_folder(file_type: str, folder: str, exts: List[str] = None,
             if f.is_dir():
                 continue
 
-            name = f.stem
             automatic_name = get_automatic_name(file_type, str(f), str(folder))
             file_hash = calculate_file_hash(str(f), automatic_type, automatic_name)
 
-            _resources.append({
+            resources.append({
                 'type': file_type,
-                'name': name,
+                'name': f.stem,
                 'hash': file_hash,
                 'path': str(f),
                 'hasPreview': has_preview(str(f)),
@@ -162,7 +159,7 @@ def get_resources_in_folder(file_type: str, folder: str, exts: List[str] = None,
     finally:
         shared.cmd_opts.no_hashing = cmd_opts_no_hashing
 
-    return _resources
+    return resources
 
 def get_all_by_hash_with_cache(file_hashes: List[str]) -> List[Dict[str, Any]]:
     """Get model information by hash with caching."""
@@ -248,8 +245,8 @@ def load_resource_list(types: List[str] = None) -> List[Dict[str, Any]]:
     # Handle VAE separately due to multiple folders
     if 'VAE' in types:
         log_message('Loading VAE resources', status='info', verbose=verbose)
-        res += get_resources_in_folder('VAE', folders['VAE1'], ['vae.pt', 'vae.safetensors', 'vae.ckpt'])
-        res += get_resources_in_folder('VAE', folders['VAE2'], ['pt', 'safetensors', 'ckpt'])
+        for vae_folder in [folders['VAE1'], folders['VAE2']]:
+            res += get_resources_in_folder('VAE', vae_folder, ['vae.pt', 'vae.safetensors', 'vae.ckpt'])
 
     resources = res
     return resources
