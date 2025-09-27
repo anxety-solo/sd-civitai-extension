@@ -75,7 +75,11 @@ def get_locon_dir() -> str:
 
 def get_model_dir() -> str:
     """Get model directory path."""
-    return shared.cmd_opts.ckpt_dir or sd_models.model_path
+    return (
+        getattr(shared.cmd_opts, 'ckpt_dir', None)
+        or getattr(shared.cmd_opts, 'ckpt_dirs', None)
+        or sd_models.model_path
+    )
 
 def get_automatic_type(file_type: str) -> str:
     """Convert file type to automatic type."""
