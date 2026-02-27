@@ -9,327 +9,301 @@ from datetime import datetime
 from pathlib import Path
 from PIL import Image
 
-# === WebUI imports ===
 from modules import shared, sd_models, sd_vae, hashes, ui_extra_networks, cache
 from modules.paths import models_path
 
-# === Extension imports ===
-from .logger import log_message
+from .logger import log
 
 
-base_url = 'https://civitai.com/api/v1'
-user_agent = 'CivitaiLink:Automatic1111'
-civil_ai_api_cache = cache.cache('civil_ai_api_sha256')
+# ~~ Config ~~
+
+BASE_URL = 'https://civitai.com/api/v1'
+USER_AGENT = 'CivitaiLink:Automatic1111'
 
 IS_KAGGLE = 'KAGGLE_URL_BASE' in os.environ
 
-resources = []
+_api_cache = cache.cache('civil_ai_api_sha256')
+_resources: List[Dict[str, Any]] = []
 
 
-def get_verbose() -> bool:
-    """Get verbose logging setting."""
+# ~~ Helpers ~~
+
+def _verbose() -> bool:
+    """Get verbose logging setting"""
     return getattr(shared.opts, 'civitai_verbose', False)
 
+def _suppress_output(func, *args, **kwargs):
+    """Run func with both stdout and stderr suppressed"""
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    old_stdout_fd = os.dup(1)
+    old_stderr_fd = os.dup(2)
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        return func(*args, **kwargs)
+    finally:
+        os.dup2(old_stdout_fd, 1)
+        os.dup2(old_stderr_fd, 2)
+        os.close(old_stdout_fd)
+        os.close(old_stderr_fd)
+        os.close(devnull_fd)
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+
+
+# ~~ API ~~
 
 def req(endpoint: str, method: str = 'GET', data: Any = None, params: Dict[str, Any] = None, headers: Dict[str, str] = None) -> Dict[str, Any]:
-    """Make HTTP request to Civitai API."""
+    """Make HTTP request to Civitai API"""
     if headers is None:
         headers = {}
-    headers['User-Agent'] = user_agent
+    headers['User-Agent'] = USER_AGENT
 
-    api_key = shared.opts.data.get('civitai_api_key', None)
-    if api_key is not None:
+    api_key = shared.opts.data.get('civitai_api_key')
+    if api_key:
         headers['Authorization'] = f"Bearer {api_key}"
 
     if data is not None:
         headers['Content-Type'] = 'application/json'
         data = json.dumps(data)
 
-    if not endpoint.startswith('/'):
-        endpoint = '/' + endpoint
-
-    if params is None:
-        params = {}
-
-    response = requests.request(method, base_url + endpoint, data=data, params=params, headers=headers)
+    url = BASE_URL + ('/' + endpoint.lstrip('/'))
+    response = requests.request(method, url, data=data, params=params or {}, headers=headers)
     if response.status_code != 200:
         raise Exception(f"Error: {response.status_code} {response.text}")
-
     return response.json()
 
-def get_all_by_hash(hashes: List[str]) -> List[Dict[str, Any]]:
-    """Get model information by hash list."""
-    response = req(f"/model-versions/by-hash", method='POST', data=hashes)
-    return response
+def get_all_by_hash(file_hashes: List[str]) -> List[Dict[str, Any]]:
+    """Get model information by hash list"""
+    return req('/model-versions/by-hash', method='POST', data=file_hashes)
+
+def get_all_by_hash_with_cache(file_hashes: List[str]) -> List[Dict[str, Any]]:
+    """Get model information by hash with caching"""
+    missing = [h for h in file_hashes if h not in _api_cache]
+    new_results = []
+
+    if missing:
+        log.info(f"Fetching info for {len(missing)} missing hashes", _verbose())
+        try:
+            for i in range(0, len(missing), 100):
+                new_results.extend(get_all_by_hash(missing[i:i + 100]))
+        except Exception as e:
+            log.error(f"Error fetching model info: {e}")
+            raise
+
+    new_results.sort(
+        key=lambda x: datetime.fromisoformat(x['createdAt'].rstrip('Z')),
+        reverse=True
+    )
+
+    found = set()
+    for meta in new_results:
+        for f in meta['files']:
+            h = f['hashes']['SHA256'].lower()
+            _api_cache[h] = meta
+            found.add(h)
+
+    for h in set(missing) - found:
+        _api_cache[h] = None
+
+    return [_api_cache[h] for h in file_hashes if _api_cache.get(h)]
+
+
+# ~~ Directories ~~
 
 def get_lora_dir() -> str:
-    """Get LoRA directory path."""
     return shared.cmd_opts.lora_dir
 
 def get_locon_dir() -> str:
-    """Get LoCon directory path."""
     try:
         return shared.cmd_opts.lyco_dir or get_lora_dir()
     except AttributeError:
         return get_lora_dir()
 
 def get_model_dir() -> str:
-    """Get model directory path."""
     return (
         getattr(shared.cmd_opts, 'ckpt_dir', None)
         or getattr(shared.cmd_opts, 'ckpt_dirs', None)
         or sd_models.model_path
     )
 
-def get_automatic_type(file_type: str) -> str:
-    """Convert file type to automatic type."""
-    return file_type.lower()
 
-def get_automatic_name(file_type: str, filename: str, folder: str) -> str:
-    """Get automatic name for file."""
-    path = Path(filename).resolve()
-    folder_path = Path(folder).resolve()
+# ~~ Resources ~~
 
-    try:
-        fullname = path.relative_to(folder_path)
-    except ValueError:
-        fullname = path.name
-
-    if file_type == 'Checkpoint':
-        return str(fullname)
-    return str(fullname.with_suffix(''))
-
-def has_preview(filename: str) -> bool:
-    """Check if file has preview image."""
+def _has_preview(filename: str) -> bool:
+    """Check if file has a preview image"""
     preview_exts = ui_extra_networks.allowed_preview_extensions()
-    preview_exts = [*preview_exts, *['preview.' + x for x in preview_exts]]
-    for ext in preview_exts:
-        if Path(filename).with_suffix(f".{ext}").exists():
-            return True
-    return False
+    preview_exts = [*preview_exts, *[f"preview.{x}" for x in preview_exts]]
+    return any(Path(filename).with_suffix(f".{ext}").exists() for ext in preview_exts)
 
-def has_info(filename: str) -> bool:
-    """Check if file has info JSON."""
+def _has_info(filename: str) -> bool:
+    """Check if file has an info JSON sidecar"""
     return Path(filename).with_suffix('.json').exists()
 
-def calculate_file_hash(file_path: str, automatic_type: str, automatic_name: str) -> str:
-    """Calculate file hash with optional output suppression."""
-    suppress_hash_output = getattr(shared.opts, 'civitai_suppress_hash_output', True)
+def _auto_name(file_type: str, filename: str, folder: str) -> str:
+    """Get automatic name for file relative to folder"""
+    path = Path(filename).resolve()
+    try:
+        rel = path.relative_to(Path(folder).resolve())
+    except ValueError:
+        rel = Path(path.name)
+    return str(rel) if file_type == 'Checkpoint' else str(rel.with_suffix(''))
 
-    if suppress_hash_output:
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            file_hash = hashes.sha256(str(file_path), f"{automatic_type}/{automatic_name}")
-        finally:
-            sys.stdout = old_stdout
-    else:
-        file_hash = hashes.sha256(str(file_path), f"{automatic_type}/{automatic_name}")
-
-    return file_hash
+def _calc_hash(path: str, auto_type: str, auto_name: str) -> str:
+    """Calculate SHA256 file hash, optionally suppressing all console output"""
+    fn = lambda: hashes.sha256(path, f"{auto_type}/{auto_name}")
+    if getattr(shared.opts, 'civitai_suppress_hash_output', True):
+        return _suppress_output(fn)
+    return fn()
 
 def get_resources_in_folder(file_type: str, folder: str, exts: List[str] = None, exts_exclude: List[str] = None) -> List[Dict[str, Any]]:
-    """Get resources from folder with specified extensions."""
+    """Get resources from folder with specified extensions"""
     exts = exts or []
     exts_exclude = exts_exclude or []
     folder = Path(folder).resolve()
     folder.mkdir(parents=True, exist_ok=True)
 
-    automatic_type = get_automatic_type(file_type)
-    candidates = [f for ext in exts for f in folder.rglob(f"*.{ext}")
-                 if not any(str(f).endswith(e) for e in exts_exclude)]
+    auto_type = file_type.lower()
+    candidates = [
+        f for ext in exts for f in folder.rglob(f"*.{ext}")
+        if not f.is_dir() and not any(str(f).endswith(e) for e in exts_exclude)
+    ]
 
-    resources = []
-    cmd_opts_no_hashing = shared.cmd_opts.no_hashing
+    result = []
+    old_no_hashing = shared.cmd_opts.no_hashing
     shared.cmd_opts.no_hashing = False
 
     try:
         for f in sorted(candidates):
-            if f.is_dir():
-                continue
-
-            automatic_name = get_automatic_name(file_type, str(f), str(folder))
-            file_hash = calculate_file_hash(str(f), automatic_type, automatic_name)
-
-            resources.append({
+            auto_name = _auto_name(file_type, str(f), str(folder))
+            result.append({
                 'type': file_type,
                 'name': f.stem,
-                'hash': file_hash,
+                'hash': _calc_hash(str(f), auto_type, auto_name),
                 'path': str(f),
-                'hasPreview': has_preview(str(f)),
-                'hasInfo': has_info(str(f))
+                'hasPreview': _has_preview(str(f)),
+                'hasInfo': _has_info(str(f)),
             })
-
     finally:
-        shared.cmd_opts.no_hashing = cmd_opts_no_hashing
+        shared.cmd_opts.no_hashing = old_no_hashing
 
-    return resources
-
-def get_all_by_hash_with_cache(file_hashes: List[str]) -> List[Dict[str, Any]]:
-    """Get model information by hash with caching."""
-    verbose = get_verbose()
-    missing_info_hashes = [file_hash for file_hash in file_hashes if file_hash not in civil_ai_api_cache]
-    new_results = []
-
-    if missing_info_hashes:
-        log_message(f"Fetching info for {len(missing_info_hashes)} missing hashes", status='info', verbose=verbose)
-
-        try:
-            for i in range(0, len(missing_info_hashes), 100):
-                batch = missing_info_hashes[i:i + 100]
-                new_results.extend(get_all_by_hash(batch))
-        except Exception as e:
-            log_message(f"Error fetching model info: {e}", status='error', verbose=verbose)
-            raise e
-
-    new_results = sorted(new_results, key=lambda x: datetime.fromisoformat(x['createdAt'].rstrip('Z')), reverse=True)
-
-    found_info_hashes = set()
-
-    for new_metadata in new_results:
-        for file in new_metadata['files']:
-            file_hash = file['hashes']['SHA256'].lower()
-            civil_ai_api_cache[file_hash] = new_metadata
-            found_info_hashes.add(file_hash)
-
-    for file_hash in set(missing_info_hashes) - found_info_hashes:
-        civil_ai_api_cache[file_hash] = None
-
-    final_results = []
-
-    for h in file_hashes:
-        cached = civil_ai_api_cache.get(h)
-        if cached:
-            final_results.append(cached)
-
-    return final_results
+    return result
 
 def load_resource_list(types: List[str] = None) -> List[Dict[str, Any]]:
-    """Load resource list from all configured folders."""
-    global resources
-    verbose = get_verbose()
+    """Load resource list from all configured folders"""
+    global _resources
 
     if types is None:
         types = ['LORA', 'LoCon', 'TextualInversion', 'Checkpoint', 'VAE', 'Controlnet', 'Upscaler']
 
-    res = [r for r in resources if r['type'] not in types]
+    res = [r for r in _resources if r['type'] not in types]
 
-    folders = {
-        'LORA': Path(get_lora_dir()),
-        'LoCon': Path(get_locon_dir()),
-        'TextualInversion': Path(getattr(shared.cmd_opts, 'embeddings_dir', '')),
-        'Checkpoint': Path(get_model_dir()),
-        'Controlnet': Path(models_path) / 'ControlNet',
-        'Upscaler': Path(models_path) / 'ESRGAN',
-        'VAE1': Path(get_model_dir()),
-        'VAE2': Path(getattr(sd_vae, 'vae_path', '')),
-    }
+    lora_dir = Path(get_lora_dir())
+    locon_dir = Path(get_locon_dir())
+    model_dir = Path(get_model_dir())
 
-    # Load resources for each type
     type_configs = [
-        ('LORA', folders['LORA'], ['pt', 'safetensors', 'ckpt']),
-        ('LoCon', folders['LoCon'], ['pt', 'safetensors', 'ckpt']) if folders['LORA'] != folders['LoCon'] else None,
-        ('TextualInversion', folders['TextualInversion'], ['pt', 'bin', 'safetensors']),
-        ('Checkpoint', folders['Checkpoint'], ['safetensors', 'ckpt'], ['vae.safetensors', 'vae.ckpt']),
-        ('Controlnet', folders['Controlnet'], ['safetensors', 'ckpt'], ['vae.safetensors', 'vae.ckpt']),
-        ('Upscaler', folders['Upscaler'], ['safetensors', 'ckpt', 'pt']),
+        ('LORA', lora_dir, ['pt', 'safetensors', 'ckpt']),
+        ('LoCon', locon_dir, ['pt', 'safetensors', 'ckpt']) if locon_dir != lora_dir else None,
+        ('TextualInversion', Path(getattr(shared.cmd_opts, 'embeddings_dir', '')), ['pt', 'bin', 'safetensors']),
+        ('Checkpoint', model_dir, ['safetensors', 'ckpt'], ['vae.safetensors', 'vae.ckpt']),
+        ('Controlnet', Path(models_path) / 'ControlNet', ['safetensors', 'ckpt'], ['vae.safetensors', 'vae.ckpt']),
+        ('Upscaler', Path(models_path) / 'ESRGAN', ['safetensors', 'ckpt', 'pt']),
     ]
 
-    for config in type_configs:
-        if config is None:
+    for cfg in type_configs:
+        if cfg is None:
             continue
+        t, folder, exts, *rest = cfg
+        if t in types:
+            log.info(f"Loading {t} resources from {folder}", _verbose())
+            res += get_resources_in_folder(t, str(folder), exts, rest[0] if rest else [])
 
-        type_name, folder, exts = config[:3]
-        exts_exclude = config[3] if len(config) > 3 else []
-
-        if type_name in types:
-            log_message(f"Loading {type_name} resources from {folder}", status='info', verbose=verbose)
-            res += get_resources_in_folder(type_name, folder, exts, exts_exclude)
-
-    # Handle VAE separately due to multiple folders
+    # VAE handled separately — may span two distinct folders
     if 'VAE' in types:
-        log_message('Loading VAE resources', status='info', verbose=verbose)
-        for vae_folder in [folders['VAE1'], folders['VAE2']]:
-            res += get_resources_in_folder('VAE', vae_folder, ['vae.pt', 'vae.safetensors', 'vae.ckpt'])
+        log.info('Loading VAE resources', _verbose())
+        vae_exts = ['vae.pt', 'vae.safetensors', 'vae.ckpt']
+        vae_path = Path(getattr(sd_vae, 'vae_path', ''))
+        for folder in {model_dir, vae_path}:
+            res += get_resources_in_folder('VAE', str(folder), vae_exts)
 
-    resources = res
-    return resources
+    _resources = res
+    return res
 
 def get_model_by_hash(file_hash: str) -> Optional[Any]:
-    """Get model by hash from checkpoints list."""
-    found = [info for info in sd_models.checkpoints_list.values()
-             if file_hash == info.sha256 or file_hash == info.shorthash or file_hash == info.hash]
+    """Get checkpoint model by hash from the checkpoints list"""
+    found = [
+        info for info in sd_models.checkpoints_list.values()
+        if file_hash in (info.sha256, info.shorthash, info.hash)
+    ]
     return found[0] if found else None
 
-def get_resource_by_hash(hash: str) -> Optional[Dict[str, Any]]:
-    """Get resource by hash."""
-    resources = load_resource_list([])
-    found = [resource for resource in resources
-             if hash.lower() == resource['hash'] and ('downloading' not in resource or resource['downloading'] != True)]
+def get_resource_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
+    """Get resource by hash, excluding resources currently being downloaded"""
+    found = [
+        r for r in load_resource_list([])
+        if file_hash.lower() == r['hash'] and not r.get('downloading')
+    ]
     return found[0] if found else None
 
-def _resize_image_bytes(image_bytes, target_size=512):
-    """Resize image bytes to target_size on the longer side, keeping aspect ratio."""
+
+# ~~ Preview download ~~
+
+def _resize_image_bytes(image_bytes: bytes, target_size: int = 512) -> io.BytesIO:
+    """Resize image bytes to target_size on the longer side, keeping aspect ratio"""
     image = Image.open(io.BytesIO(image_bytes))
-    width, height = image.size
-
-    if width > height:
-        new_size = (target_size, int(height * target_size / width))
-    else:
-        new_size = (int(width * target_size / height), target_size)
-
+    w, h = image.size
+    scale = target_size / max(w, h)
+    new_size = (int(w * scale), int(h * scale))
     output = io.BytesIO()
     image.resize(new_size, Image.LANCZOS).save(output, format='PNG')
     output.seek(0)
     return output
 
-def download_preview(url: str, dest_path: str, on_progress: callable = None) -> bool:
-    """Download and resize preview image. Returns True if successful, False otherwise."""
-    verbose = get_verbose()
+def download_preview(url: str, dest_path: str, on_progress=None) -> bool:
+    """Download and resize preview image"""
     dest = Path(dest_path).expanduser()
     if dest.exists():
         return True
 
-    log_message(f"Downloading preview: {url}", status='info', verbose=verbose)
-
-    response = requests.get(url, stream=True, headers={'User-Agent': user_agent})
+    log.info(f"Downloading preview: {url}", _verbose())
+    response = requests.get(url, stream=True, headers={'User-Agent': USER_AGENT})
     total = int(response.headers.get('content-length', 0))
     start_time = time.time()
 
     try:
-        image_data = bytearray()
-        current = 0
-        for data in response.iter_content(chunk_size=8192):
-            image_data.extend(data)
-            current += len(data)
-            if on_progress is not None:
-                should_stop = on_progress(current, total, start_time)
-                if should_stop:
-                    raise Exception('Download cancelled')
+        data = bytearray()
+        for chunk in response.iter_content(chunk_size=8192):
+            data.extend(chunk)
+            if on_progress and on_progress(len(data), total, start_time):
+                raise Exception('Download cancelled')
 
-        resized_image = _resize_image_bytes(image_data)
+        resized = _resize_image_bytes(bytes(data))
 
         if IS_KAGGLE:
-            import sd_image_encryption     # Import Module for Encrypt Image
-            img = Image.open(resized_image)
+            import sd_image_encryption
+            img = Image.open(resized)
             imginfo = img.info or {}
-            if not all(key in imginfo for key in ['Encrypt', 'EncryptPwdSha']):
+            if not all(k in imginfo for k in ('Encrypt', 'EncryptPwdSha')):
                 sd_image_encryption.EncryptedImage.from_image(img).save(dest)
         else:
-            dest.write_bytes(resized_image.read())
+            dest.write_bytes(resized.read())
         return True
 
     except Exception as e:
-        log_message(f"Preview download failed: {dest} : {e}", status='error', verbose=verbose)
+        log.error(f"Preview download failed [{dest}]: {e}")
         if dest.exists():
             dest.unlink()
         return False
 
-
-def update_resource_preview(hash: str, preview_url: str) -> bool:
-    """Update preview for resource with given hash. Returns True if successful, False otherwise."""
+def update_resource_preview(file_hash: str, preview_url: str) -> bool:
+    """Update preview for resource with given hash"""
     success = False
-    for res in [r for r in load_resource_list([]) if r['hash'] == hash.lower()]:
+    for res in [r for r in load_resource_list([]) if r['hash'] == file_hash.lower()]:
         preview_path = Path(res['path']).with_suffix('.preview.png')
         if download_preview(preview_url, str(preview_path)):
             success = True
