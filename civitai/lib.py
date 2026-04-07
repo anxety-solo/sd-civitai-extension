@@ -116,7 +116,10 @@ def get_all_by_hash_with_cache(file_hashes: List[str]) -> List[Dict[str, Any]]:
 # ~~ Directories ~~
 
 def get_lora_dir() -> str:
-    return shared.cmd_opts.lora_dir
+    return (
+        getattr(shared.cmd_opts, 'lora_dir', None)
+        or getattr(shared.cmd_opts, 'lora_dirs', None)
+    )
 
 def get_locon_dir() -> str:
     try:
