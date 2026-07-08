@@ -11,7 +11,7 @@ from civitai.core import scan_resources, save_json, save_preview
 from civitai.logger import log
 
 
-VERSION  = '4.0'
+VERSION  = '4.2'
 _lock    = threading.Lock()
 _TYPES   = ['LORA', 'LoCon', 'DoRA', 'TextualInversion', 'Checkpoint']
 _SECTION = ('ce_extension', 'CivitAI-Extension')
@@ -115,9 +115,10 @@ def setup_settings():
 
     _opt('ce_api_key', '', 'Civitai API Key', info='Optional — for authenticated requests')
     _opt('ce_skip_existing', True, 'Skip existing preview/info files (no overwrite)')
-    _opt('ce_verbose', False, 'Verbose logging')
+    _opt('ce_save_description', False, 'Save description in JSON (requires extra API call)')
     _opt('ce_hashify_resources', False, 'Include resource hashes in image metadata')
     _opt('ce_suppress_hash_output', True, 'Suppress hash calculation output')
+    _opt('ce_verbose', False, 'Verbose logging')
 
 
 on_app_started(on_app_start)

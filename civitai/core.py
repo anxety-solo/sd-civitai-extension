@@ -66,15 +66,13 @@ def get_model_dirs() -> Dict[str, Path]:
     ckpt_dir = _get_opt('ckpt_dir', str(sd_models.model_path), 'ckpt_dirs')
     lora_dir = _get_opt('lora_dir', str(Path(models_path) / 'Lora'), 'lora_dirs')
     emb_dir  = _get_opt('embeddings_dir', str(Path(models_path) / 'embeddings'), 'embeddings_dirs')
-    vae_dir  = _get_opt('vae_dir', str(Path(models_path) / 'VAE'), 'vae_dirs')
 
     return {
         'Checkpoint':       Path(ckpt_dir),
         'LORA':             Path(lora_dir),
         'LoCon':            Path(lora_dir),
+        'DoRA':             Path(lora_dir),
         'TextualInversion': Path(emb_dir),
-        'VAE':              Path(vae_dir),
-        'VAE_extra':        Path(vae_dir),
     }
 
 
@@ -119,20 +117,17 @@ def scan_resources(types: List[str]) -> List[Dict]:
         cmd_opts.no_hashing = False
 
     try:
-        dirs   = get_model_dirs()
-        result = []
+        dirs       = get_model_dirs()
+        result     = []
+        seen_paths = set()
         for type in types:
             folder = dirs.get(type)
 
-            if type == 'VAE':
-                for key in ('VAE', 'VAE_extra'):
-                    folder_path = dirs.get(key)
-                    if folder_path and folder_path.exists():
-                        result.extend(_scan_folder(key, str(folder_path), MODEL_EXTENSIONS))
-                continue
-
             if folder and folder.exists():
-                result.extend(_scan_folder(type, str(folder), MODEL_EXTENSIONS))
+                for item in _scan_folder(type, str(folder), MODEL_EXTENSIONS):
+                    if item['path'] not in seen_paths:
+                        seen_paths.add(item['path'])
+                        result.append(item)
 
         _resources = result
         return result
@@ -148,10 +143,11 @@ def save_json(version: Dict, resource_path: str, sha256: str, skip_existing: boo
         return False
 
     model_id    = version.get('modelId', 0)
+    version_id  = version.get('id', 0),
     model       = version.get('model', {})
     description = model.get('description', '')
 
-    if not description and model_id:
+    if not description and model_id and getattr(opts, 'ce_save_description', False):
         try:
             model_data  = get_model(model_id)
             description = model_data.get('description', '')
@@ -163,12 +159,12 @@ def save_json(version: Dict, resource_path: str, sha256: str, skip_existing: boo
         'modelName':    model.get('name', ''),
         'versionName':  version.get('name', ''),
         'modelId':      model_id,
-        'versionId':    version.get('id', 0),
+        'versionId':    version_id,
         'contentType':  model.get('type', ''),
         'baseModel':    version.get('baseModel', ''),
         'trainedTags':  version.get('trainedWords', []),
         'description':  description,
-        'modelPageURL': f"https://civitai.red/models/{model_id}?modelVersionId={version.get('id')}",
+        'modelPageURL': f"https://civitai.red/models/{model_id}?modelVersionId={version_id}",
         'sha256':       sha256.upper(),
     }
 
