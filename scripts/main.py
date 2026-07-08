@@ -1,191 +1,124 @@
 import threading
-import json
+
 import gradio as gr
-from pathlib import Path
 
 from modules.script_callbacks import on_app_started, on_ui_settings
-from modules import shared
+from modules.shared import opts, OptionInfo
 
-import civitai.lib as civitai
-from civitai.lib import log, _verbose
+import civitai.api as api
 
-
-VERSION = '3.0'
-_lock = threading.Lock()
-_TYPES = ['LORA', 'LoCon', 'TextualInversion', 'Checkpoint']
-
-_BASE_MODELS = {
-    'SD 1': 'SD1', 'SD 1.5': 'SD1', 'SD 2': 'SD2', 'SD 3': 'SD3',
-    'SDXL': 'SDXL', 'Pony': 'SDXL', 'Illustrious': 'SDXL',
-}
+from civitai.core import scan_resources, save_json, save_preview
+from civitai.logger import log
 
 
-# ~~ Processing ~~
+VERSION  = '4.0'
+_lock    = threading.Lock()
+_TYPES   = ['LORA', 'LoCon', 'DoRA', 'TextualInversion', 'Checkpoint']
+_SECTION = ('ce_extension', 'CivitAI-Extension')
 
-def _process_resources(label: str, missing_cond, process_fn):
-    """Common function to process resources (info or preview)"""
-    missing = [r for r in civitai.load_resource_list() if r['type'] in _TYPES and missing_cond(r)]
+
+def _opt(key: str, default, label: str, *, info: str = None):
+    """Register a CivitAI extension option in WebUI settings"""
+    opt = OptionInfo(default=default, label=label, section=_SECTION)
+    if info:
+        opt.info(info)
+    opts.add_option(key, opt)
+
+
+def _process_resources(label: str, cond, save_fn):
+    """Find resources matching a condition, look them up via API, and apply save_fn"""
+    resources = scan_resources(_TYPES)
+    missing   = [r for r in resources if r['type'] in _TYPES and cond(r)]
     if not missing:
         return
 
-    hashes = [r['hash'] for r in missing]
-    results = civitai.get_all_by_hash_with_cache(hashes)
+    hashes  = [r['hash'] for r in missing]
+    results = api.get_by_hash_cached(hashes)
     if not results:
         return
 
-    log.info(f"Checking resources for missing {label}...")
-    updated = 0
+    log.success(f"Updating {label} for {len(missing)} resources...")
+
+    updated   = 0
     processed = set()
 
-    for meta in results:
-        if meta is None:
+    for version in results:
+        if version is None:
             continue
-        for f in meta['files']:
-            if 'hashes' not in f or 'SHA256' not in f['hashes']:
+        for file in version.get('files', []):
+            sha256 = file.get('hashes', {}).get('SHA256', '').lower()
+            if not sha256:
                 continue
-            sha = f['hashes']['SHA256'].lower()
-            if sha not in hashes:
-                continue
-            for res in [r for r in missing if r['hash'] == sha]:
-                if process_fn(meta, res, processed):
-                    updated += 1
+            for res in missing:
+                if res['hash'] == sha256:
+                    if res['path'] in processed:
+                        continue
+                    if save_fn(version, res):
+                        updated += 1
+                        processed.add(res['path'])
+                    break
 
     if updated:
         log.info(f"Updated {updated} {label} files")
 
-def _process_info_file(meta: dict, res: dict, processed: set) -> bool:
-    """Process info file for a resource"""
-    path = Path(res['path']).with_suffix('.json')
-    if str(path) in processed:
-        return False
 
-    sd_ver = next((v for k, v in _BASE_MODELS.items() if k in meta.get('baseModel', '')), '')
-    path.write_text(json.dumps({
-        'activation text': ', '.join(meta.get('trainedWords', [])),
-        'sd version': sd_ver,
-        'modelId': meta['modelId'],
-        'modelVersionId': meta['id'],
-        'sha256': meta['files'][0]['hashes']['SHA256'].upper(),
-    }, indent=4), encoding='utf-8')
+def _process_info(version: dict, resource: dict) -> bool:
+    skip = getattr(opts, 'ce_skip_existing', True)
+    ok   = save_json(version, resource['path'], resource['hash'], skip_existing=skip)
+    if ok:
+        log.success(f"Saved info for: {resource['name']}")
+    return ok
 
-    if path.exists() and path.stat().st_size > 0:
-        processed.add(str(path))
-        log.success(f"Updated info for: {res['name']}", _verbose())
-        return True
 
-    log.error(f"Failed to write info for: {res['name']}")
-    return False
-
-def _process_preview_file(meta: dict, res: dict, processed: set) -> bool:
-    """Process preview file for a resource"""
-    images = meta.get('images', [])
-    # Skip animated formats — prefer static images for previews
-    preview = next((p for p in images if not p['url'].lower().endswith(('.mp4', '.gif'))), None)
+def _process_preview(version: dict, resource: dict) -> bool:
+    images  = version.get('images', [])
+    preview = next(
+        (p for p in images if not p.get('url', '').lower().endswith(('.mp4', '.gif'))),
+        None
+    )
     if not preview:
         return False
 
-    preview_path = Path(res['path']).with_suffix('.preview.png')
-    if str(preview_path) in processed:
-        return False
+    skip = getattr(opts, 'ce_skip_existing', True)
+    ok   = save_preview(preview['url'], resource['path'], skip_existing=skip)
+    if ok:
+        log.success(f"Saved preview for: {resource['name']}")
+    return ok
 
-    if civitai.update_resource_preview(res['hash'], preview['url']):
-        processed.add(str(preview_path))
-        log.success(f"Updated preview for: {res['name']}", _verbose())
-        return True
-
-    log.error(f"Failed to update preview for: {res['name']}")
-    return False
 
 def load_info():
-    """Load missing info files for resources"""
-    _process_resources('info', lambda r: not r['hasInfo'], _process_info_file)
+    _process_resources('info', lambda r: not r['has_info'], _process_info)
+
 
 def load_preview():
-    """Load missing preview images for resources"""
-    _process_resources('preview', lambda r: not r['hasPreview'], _process_preview_file)
+    _process_resources('preview', lambda r: not r['has_preview'], _process_preview)
 
-def _run_with_lock(func, label: str):
-    """Run function in thread-safe manner"""
+
+def _run_locked(label: str, fn):
     with _lock:
         try:
-            func()
+            fn()
         except Exception as e:
             log.error(f"Error in {label}: {e}")
 
 
-# ~~ App startup ~~
+def on_app_start(_: gr.Blocks, app):
+    """Extension entry point — launches background threads for info/preview sync"""
+    log.info(f"Starting \033[32mV{VERSION}\033[0m")
 
-def app(_: gr.Blocks, app):
-    """Initialize extension on app start"""
-    log.info(f"Starting CivitAI-Extension \033[32mV{VERSION}\033[0m")
-
-    threading.Thread(target=_run_with_lock, args=(load_info, 'info')).start()
-    threading.Thread(target=_run_with_lock, args=(load_preview, 'preview')).start()
+    threading.Thread(target=_run_locked, args=('info', load_info)).start()
+    threading.Thread(target=_run_locked, args=('preview', load_preview)).start()
 
 
-# ~~ Settings ~~
+def setup_settings():
+    """Register CivitAI extension options in the WebUI settings panel"""
 
-def on_settings():
-    """Register extension settings in the WebUI settings panel"""
-    section = ('civitai_extension', 'CivitAI')
-
-    shared.opts.add_option(
-        'civitai_api_key',
-        shared.OptionInfo(
-            default='',
-            label='Your Civitai API Key',
-            section=section
-        ).info('You can find your API key in your CivitAI account settings')
-    )
-    shared.opts.add_option(
-        'civitai_hashify_resources',
-        shared.OptionInfo(
-            default=True,
-            label='Include resource hashes in image metadata (for resource auto-detection on Civitai)',
-            section=section
-        )
-    )
-    shared.opts.add_option(
-        'civitai_folder_model',
-        shared.OptionInfo(
-            default='',
-            label='Models directory (if not default)',
-            section=section
-        ).info('Specify a custom directory for models')
-    )
-    shared.opts.add_option(
-        'civitai_folder_lora',
-        shared.OptionInfo(
-            default='',
-            label='LoRA directory (if not default)',
-            section=section
-        ).info('Specify a custom directory for LoRA files')
-    )
-    shared.opts.add_option(
-        'civitai_folder_lyco',
-        shared.OptionInfo(
-            default='',
-            label='LyCORIS directory (if not default)',
-            section=section
-        ).info('Specify a custom directory for LyCORIS files')
-    )
-    shared.opts.add_option(
-        'civitai_verbose',
-        shared.OptionInfo(
-            default=False,
-            label='Enable verbose logging for Civitai extension',
-            section=section
-        ).info('Enable this option to see detailed log messages from the Civitai extension')
-    )
-    shared.opts.add_option(
-        'civitai_suppress_hash_output',
-        shared.OptionInfo(
-            default=True,
-            label='Suppress hash calculation output messages',
-            section=section
-        ).info('If enabled, hash calculation messages will not be shown in the console output')
-    )
+    _opt('ce_api_key', '', 'Civitai API Key', info='Optional — for authenticated requests')
+    _opt('ce_skip_existing', True, 'Skip existing preview/info files (no overwrite)')
+    _opt('ce_verbose', False, 'Verbose logging')
+    _opt('ce_hashify_resources', False, 'Include resource hashes in image metadata')
+    _opt('ce_suppress_hash_output', True, 'Suppress hash calculation output')
 
 
-on_app_started(app)
-on_ui_settings(on_settings)
+on_app_started(on_app_start)
+on_ui_settings(setup_settings)

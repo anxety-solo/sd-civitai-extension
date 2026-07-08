@@ -1,23 +1,64 @@
-class Logger:
-    _COLORS = {
-        'info':    '\033[34m',
-        'success': '\033[32m',
-        'warning': '\033[33m',
-        'error':   '\033[31m',
-    }
-    _RESET = '\033[0m'
+import logging
+import sys
 
-    def _log(self, level: str, msg: str, verbose: bool = True):
-        """Format and print a colored log message, gated by verbose for info/success."""
-        if not verbose and level in ('info', 'success'):
-            return
-        color = self._COLORS[level]
-        tag = f" [{level.upper()}]:" if level in ('warning', 'error') else ''
-        print(f"{color}[CivitAI-Extension]:{self._RESET}{tag} {msg}")
 
-    def info(self, msg: str, verbose: bool = True):    self._log('info', msg, verbose)
-    def success(self, msg: str, verbose: bool = True): self._log('success', msg, verbose)
-    def warning(self, msg: str):                       self._log('warning', msg)
-    def error(self, msg: str):                         self._log('error', msg)
+_PREFIX = '[CivitAI-Extension]'
 
-log = Logger()
+
+def _is_verbose() -> bool:
+    try:
+        from modules.shared import opts
+        return bool(getattr(opts, 'ce_verbose', False))
+    except Exception:
+        return True
+
+
+_BLUE = '\033[34m'
+_RESET = '\033[0m'
+_COLORS = {
+    'WARNING': '\033[33m',
+    'ERROR':   '\033[31m',
+}
+
+
+class _Formatter(logging.Formatter):
+    def format(self, record: logging.LogRecord):
+        prefix = f"{_BLUE}{_PREFIX}{_RESET}"
+        if record.levelno == logging.INFO:
+            return f"{prefix} - {record.getMessage()}"
+
+        color = _COLORS.get(record.levelname, '')
+
+        if color:
+            level = f"{color}{record.levelname}{_RESET}"
+        else:
+            level = record.levelname
+
+        return f"{prefix} - {level} - {record.getMessage()}"
+
+
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(_Formatter())
+
+_log = logging.getLogger('civitai_extension')
+_log.setLevel(logging.DEBUG)
+_log.addHandler(_handler)
+_log.propagate = False
+
+
+class _LogWrapper:
+    def info(self, msg: str):
+        _log.info(msg)
+
+    def success(self, msg: str):
+        if _is_verbose():
+            _log.info(msg)
+
+    def warning(self, msg: str):
+        _log.warning(msg)
+
+    def error(self, msg: str):
+        _log.error(msg)
+
+
+log = _LogWrapper()
