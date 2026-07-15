@@ -143,7 +143,7 @@ def save_json(version: Dict, resource_path: str, sha256: str, skip_existing: boo
         return False
 
     model_id    = version.get('modelId', 0)
-    version_id  = version.get('id', 0),
+    version_id  = version.get('id', 0)
     model       = version.get('model', {})
     description = model.get('description', '')
 
